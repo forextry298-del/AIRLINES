@@ -122,32 +122,69 @@ def packages():
 @login_required
 def order_package(pid):
  with db() as c:
+  c.execute('BEGIN IMMEDIATE')
   p=c.execute('SELECT * FROM packages WHERE id=? AND active=1',(pid,)).fetchone()
-  if not p: flash('Package not found.','error')
-  else:
-   cur=c.execute('INSERT INTO orders(user_id,package_id,status,created_at) VALUES(?,?,?,?)',(g.user['id'],pid,'pending',now()))
-   flash(f'Package request #{cur.lastrowid} submitted for review.','success')
+  u=c.execute('SELECT * FROM users WHERE id=?',(g.user['id'],)).fetchone()
+  if not p or not u:
+   flash('Package not found.','error')
+   return redirect(url_for('packages'))
+  if u['balance_cents'] < p['price_cents']:
+   flash('Insufficient balance. Please deposit funds before purchasing this machine.','error')
+   return redirect(url_for('packages'))
+
+  started=datetime.now(timezone.utc)
+  due=(started+timedelta(hours=24)).isoformat()
+  changed=c.execute(
+   'UPDATE users SET balance_cents=balance_cents-? WHERE id=? AND balance_cents>=?',
+   (p['price_cents'],u['id'],p['price_cents'])
+  ).rowcount
+  if changed != 1:
+   flash('Insufficient balance. No purchase was made.','error')
+   return redirect(url_for('packages'))
+
+  cur=c.execute(
+   "INSERT INTO orders(user_id,package_id,status,created_at,activated_at,next_credit_at) VALUES(?,?,?,?,?,?)",
+   (u['id'],pid,'active',started.isoformat(),started.isoformat(),due)
+  )
+  oid=cur.lastrowid
+  c.execute(
+   'INSERT INTO ledger(user_id,amount_cents,entry_type,note,created_at) VALUES(?,?,?,?,?)',
+   (u['id'],-p['price_cents'],'package_purchase',f"Purchased {p['name']} machine #{oid}",started.isoformat())
+  )
+
+  # Pay referral commissions once per successful machine purchase.
+  # The UNIQUE ledger check below makes this purchase's commission idempotent.
+  rates=[(u['referred_by'],20,1)]
+  if u['referred_by']:
+   parent=c.execute('SELECT referred_by FROM users WHERE referral_code=?',(u['referred_by'],)).fetchone()
+   if parent and parent['referred_by']:
+    rates.append((parent['referred_by'],10,2))
+    grand=c.execute('SELECT referred_by FROM users WHERE referral_code=?',(parent['referred_by'],)).fetchone()
+    if grand and grand['referred_by']:
+     rates.append((grand['referred_by'],5,3))
+
+  for referral_code,percent,level in rates:
+   if not referral_code:
+    continue
+   recipient=c.execute('SELECT id FROM users WHERE referral_code=?',(referral_code,)).fetchone()
+   if not recipient:
+    continue
+   commission=p['price_cents']*percent//100
+   note=f"Level {level} referral commission for machine purchase #{oid}"
+   exists=c.execute(
+    "SELECT 1 FROM ledger WHERE user_id=? AND entry_type='referral_commission' AND note=?",
+    (recipient['id'],note)
+   ).fetchone()
+   if exists:
+    continue
+   c.execute('UPDATE users SET balance_cents=balance_cents+? WHERE id=?',(commission,recipient['id']))
+   c.execute(
+    'INSERT INTO ledger(user_id,amount_cents,entry_type,note,created_at) VALUES(?,?,?,?,?)',
+    (recipient['id'],commission,'referral_commission',note,started.isoformat())
+   )
+
+  flash(f"Purchase successful! {p['name']} is active and payment was deducted from your balance.",'success')
  return redirect(url_for('dashboard'))
-@app.post('/admin/order/<int:oid>/<action>')
-@admin_required
-def review_order(oid,action):
- if action not in ('approve','reject'): abort(404)
- with db() as c:
-  o=c.execute("SELECT o.*,p.name,p.price_cents,p.duration_days FROM orders o JOIN packages p ON p.id=o.package_id WHERE o.id=?",(oid,)).fetchone()
-  if not o or o['status']!='pending': flash('Package request not found or already reviewed.','error')
-  elif action=='approve':
-   u=c.execute('SELECT balance_cents FROM users WHERE id=?',(o['user_id'],)).fetchone()
-   if not u or u['balance_cents']<o['price_cents']:
-    flash('Cannot activate: user has insufficient available balance.','error')
-   else:
-    started=datetime.now(timezone.utc); due=(started+timedelta(hours=24)).isoformat()
-    c.execute('UPDATE users SET balance_cents=balance_cents-? WHERE id=?',(o['price_cents'],o['user_id']))
-    c.execute("UPDATE orders SET status='active',activated_at=?,next_credit_at=? WHERE id=?",(started.isoformat(),due,oid))
-    c.execute('INSERT INTO ledger(user_id,amount_cents,entry_type,note,created_at) VALUES(?,?,?,?,?)',(o['user_id'],-o['price_cents'],'package_purchase',f"Activated {o['name']} package #{oid}",started.isoformat()))
-    flash('Package activated. Its first eligible credit is due after 24 hours and is limited by the funded earnings reserve.','success')
-  else:
-   c.execute("UPDATE orders SET status='rejected' WHERE id=?",(oid,)); flash('Package request rejected.','success')
- return redirect(url_for('admin'))
 
 @app.post('/admin/reserve/fund')
 @admin_required
