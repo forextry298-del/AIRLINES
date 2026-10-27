@@ -129,7 +129,7 @@ def order_package(pid):
    flash('Package not found.','error')
    return redirect(url_for('packages'))
   if u['balance_cents'] < p['price_cents']:
-   flash('Insufficient balance. Please deposit funds before purchasing this machine.','error')
+   flash('Insufficient balance.','error')
    return redirect(url_for('packages'))
 
   started=datetime.now(timezone.utc)
@@ -139,7 +139,7 @@ def order_package(pid):
    (p['price_cents'],u['id'],p['price_cents'])
   ).rowcount
   if changed != 1:
-   flash('Insufficient balance. No purchase was made.','error')
+   flash('Insufficient balance.','error')
    return redirect(url_for('packages'))
 
   cur=c.execute(
@@ -152,38 +152,30 @@ def order_package(pid):
    (u['id'],-p['price_cents'],'package_purchase',f"Purchased {p['name']} machine #{oid}",started.isoformat())
   )
 
-  # Pay referral commissions once per successful machine purchase.
-  # The UNIQUE ledger check below makes this purchase's commission idempotent.
-  rates=[(u['referred_by'],20,1)]
-  if u['referred_by']:
-   parent=c.execute('SELECT referred_by FROM users WHERE referral_code=?',(u['referred_by'],)).fetchone()
-   if parent and parent['referred_by']:
-    rates.append((parent['referred_by'],10,2))
-    grand=c.execute('SELECT referred_by FROM users WHERE referral_code=?',(parent['referred_by'],)).fetchone()
-    if grand and grand['referred_by']:
-     rates.append((grand['referred_by'],5,3))
-
-  for referral_code,percent,level in rates:
-   if not referral_code:
-    continue
-   recipient=c.execute('SELECT id FROM users WHERE referral_code=?',(referral_code,)).fetchone()
-   if not recipient:
-    continue
+  # Commissions are paid once per successfully paid purchase, for each existing referral level.
+  # The referral chain and the transaction are processed atomically.
+  chain=[]
+  parent_code=u['referred_by']
+  for level,percent in ((1,20),(2,10),(3,5)):
+   if not parent_code:
+    break
+   parent=c.execute('SELECT id,referred_by FROM users WHERE referral_code=?',(parent_code,)).fetchone()
+   if not parent:
+    break
+   chain.append((parent['id'],level,percent))
+   parent_code=parent['referred_by']
+  for recipient_id,level,percent in chain:
    commission=p['price_cents']*percent//100
    note=f"Level {level} referral commission for machine purchase #{oid}"
-   exists=c.execute(
-    "SELECT 1 FROM ledger WHERE user_id=? AND entry_type='referral_commission' AND note=?",
-    (recipient['id'],note)
-   ).fetchone()
-   if exists:
+   if commission <= 0:
     continue
-   c.execute('UPDATE users SET balance_cents=balance_cents+? WHERE id=?',(commission,recipient['id']))
+   c.execute('UPDATE users SET balance_cents=balance_cents+? WHERE id=?',(commission,recipient_id))
    c.execute(
     'INSERT INTO ledger(user_id,amount_cents,entry_type,note,created_at) VALUES(?,?,?,?,?)',
-    (recipient['id'],commission,'referral_commission',note,started.isoformat())
+    (recipient_id,commission,'referral_commission',note,started.isoformat())
    )
 
-  flash(f"Purchase successful! {p['name']} is active and payment was deducted from your balance.",'success')
+  flash('Purchase successful.','success')
  return redirect(url_for('dashboard'))
 
 @app.post('/admin/reserve/fund')
@@ -328,8 +320,7 @@ def forbidden(_): return render_template('error.html',code=403,message='Administ
 @app.errorhandler(404)
 def missing(_): return render_template('error.html',code=404,message='Page not found.'),404
 init_db()
-# Do not start a scheduler thread in each Gunicorn worker.
-# Run scheduled credits in one dedicated process instead.
+# In-process scheduler is only for direct local execution, never each Gunicorn worker.
 if __name__ == '__main__' and os.environ.get('AIRLINES_DISABLE_SCHEDULER','0')!='1':
  threading.Thread(target=_scheduler_loop,name='airlines-daily-credits',daemon=True).start()
 if __name__=='__main__':
