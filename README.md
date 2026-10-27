@@ -1,20 +1,22 @@
-# AIRLINES member platform starter
+# AIRLINES
 
-A Flask/SQLite responsive website with registration/login, referral codes, a member dashboard, package request catalogue, team page, and deposit/withdrawal request records.
-
-## Important
-This is an original implementation inspired by common features of the referenced site, not a pixel-for-pixel copy. It intentionally does not include guaranteed daily returns, automatic commission payouts, fabricated payment confirmations, or automatic wallet crediting. Payment forms create pending records only; no money is moved.
+Flask + SQLite member portal for local testing. Includes registration/login, UGX balances, UGX 8,000 welcome ledger credit, VIP catalogue, referral level counts, MTN/Airtel deposit recipient display, pending deposit/withdrawal requests, and an admin review panel.
 
 ## Run locally
+
 ```bash
-pkg install python -y
 pip install -r requirements.txt
-export SECRET_KEY="$(python -c 'import secrets; print(secrets.token_hex(32))')"
+export SECRET_KEY="replace-with-a-long-random-secret"
+export ADMIN_PHONE="0758878297"
 python app.py
 ```
-Open http://127.0.0.1:5000
 
-## Render
-Build command: `pip install -r requirements.txt`
-Start command: `gunicorn app:app`
-Set a long random `SECRET_KEY`. Set `DATABASE_PATH` to a persistent disk path if the deployment plan supports it. For production, add CSRF protection, rate limits, verified email/phone, audit logging, admin permissions, backups, and a compliant payment provider. SQLite on ephemeral storage can lose data during redeploys/restarts.
+Open http://127.0.0.1:5000. The account registered with the configured `ADMIN_PHONE` receives the admin role. **This starter does not verify phone ownership via OTP. Do not expose it publicly until you add verified admin provisioning, CSRF protection, rate limiting, HTTPS, secure secrets, backups, and a proper audit/security review.**
+
+## Recipient configuration
+
+Defaults for MTN and Airtel: Mary Namara, `0757837051`. For deployment, configure `AIRLINES_MTN_NAME`, `AIRLINES_MTN_NUMBER`, `AIRLINES_AIRTEL_NAME`, and `AIRLINES_AIRTEL_NUMBER` as environment variables.
+
+## Important financial limitations
+
+Payments are not integrated with MTN/Airtel APIs. Admin approval is manual and should only happen after independently verifying receipt. Package daily figures are illustrative only; there are no automatic daily rewards or referral commission payouts. Withdrawal requests are records, not actual transfers. The reference's 20% withdrawal tax must be legally verified before use. Do not use the starter to misrepresent guaranteed returns.
