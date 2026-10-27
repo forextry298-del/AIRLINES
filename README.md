@@ -1,8 +1,8 @@
-# AIRLINES
+# AIRLINES platform — v5
 
-Flask + SQLite member portal for local testing. Includes registration/login, UGX balances, UGX 8,000 welcome ledger credit, VIP catalogue, referral level counts, MTN/Airtel deposit recipient display, pending deposit/withdrawal requests, and an admin review panel.
+Flask/SQLite member portal with registration, referral tracking, package requests, payment requests, admin review, machine illustrations, a daily countdown, and scheduled credits constrained by a separately funded earnings reserve.
 
-## Run locally
+## Local run
 
 ```bash
 pip install -r requirements.txt
@@ -11,12 +11,27 @@ export ADMIN_PHONE="0758878297"
 python app.py
 ```
 
-Open http://127.0.0.1:5000. The account registered with the configured `ADMIN_PHONE` receives the admin role. **This starter does not verify phone ownership via OTP. Do not expose it publicly until you add verified admin provisioning, CSRF protection, rate limiting, HTTPS, secure secrets, backups, and a proper audit/security review.**
+## Render
 
-## Recipient configuration
+- Build command: `pip install -r requirements.txt`
+- Start command: `gunicorn app:app`
+- Set a strong `SECRET_KEY` and `ADMIN_PHONE` environment variables.
+- Configure durable storage for the database (or migrate to a managed PostgreSQL database) before accepting real customer balances.
 
-Defaults for MTN and Airtel: Mary Namara, `0757837051`. For deployment, configure `AIRLINES_MTN_NAME`, `AIRLINES_MTN_NUMBER`, `AIRLINES_AIRTEL_NAME`, and `AIRLINES_AIRTEL_NUMBER` as environment variables.
+## Scheduled daily credits
 
-## Important financial limitations
+A machine request stays pending until an administrator approves it. Approval deducts the machine price from the user's available balance and starts the 24-hour timer. The scheduler checks due orders approximately once per minute while the web service is running. A credit is issued only when the separate `earnings_reserve` has sufficient funds; the reserve is reduced in the same database transaction, and a unique `(order_id, credit_day)` constraint prevents duplicate credits. If the reserve is insufficient, credits pause until verified funds are recorded by an administrator. Configure only funds genuinely available from lawful business revenue; customer deposits must not be represented as profit or used to promise guaranteed returns.
 
-Payments are not integrated with MTN/Airtel APIs. Admin approval is manual and should only happen after independently verifying receipt. Package daily figures are illustrative only; there are no automatic daily rewards or referral commission payouts. Withdrawal requests are records, not actual transfers. The reference's 20% withdrawal tax must be legally verified before use. Do not use the starter to misrepresent guaranteed returns.
+Admin reserve funding is a manual accounting record, not a bank or mobile-money verification. Verify the source independently before adding reserve funds.
+
+## Payment limitations and production safety
+
+- MTN/Airtel details are display-only. This app does not connect to an official Mobile Money API, automatically verify transaction IDs, or send real payouts.
+- Admin approval must only happen after independent payment verification.
+- Phone-number matching alone is not strong admin authentication; verify ownership and add MFA/OTP before public launch.
+- This starter needs CSRF protection, rate limiting, secure admin onboarding, database backups, monitoring, and a production review before handling real money.
+- The package SVGs in `static/products/` are original AIRLINES illustrations, not copied source-site assets. Exact third-party product images were not exposed by the page text extraction, so these original images are used instead.
+
+## Referral links
+
+Registration accepts `?ref=REFERRAL_CODE`. Referral counts are tracked; this version does not automatically pay referral commissions.

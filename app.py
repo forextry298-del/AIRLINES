@@ -1,8 +1,8 @@
-import os, sqlite3, secrets, re
-from datetime import datetime, timezone
+import os, sqlite3, secrets, re, threading, time, sys
+from datetime import datetime, timezone, timedelta
 from functools import wraps
 from decimal import Decimal, InvalidOperation
-from flask import Flask, render_template, request, redirect, url_for, session, flash, g, abort
+from flask import Flask, render_template, request, redirect, url_for, session, flash, g, abort, jsonify
 from werkzeug.security import generate_password_hash, check_password_hash
 
 ROOT=os.path.dirname(os.path.abspath(__file__))
@@ -22,14 +22,21 @@ def init_db():
   c.executescript("""
   CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY AUTOINCREMENT,username TEXT UNIQUE COLLATE NOCASE NOT NULL,email TEXT UNIQUE COLLATE NOCASE NOT NULL,phone TEXT NOT NULL DEFAULT '',password_hash TEXT NOT NULL,role TEXT NOT NULL DEFAULT 'member',balance_cents INTEGER NOT NULL DEFAULT 0,referral_code TEXT UNIQUE NOT NULL,referred_by TEXT,created_at TEXT NOT NULL);
   CREATE TABLE IF NOT EXISTS packages(id INTEGER PRIMARY KEY,name TEXT NOT NULL,price_cents INTEGER NOT NULL,daily_display_cents INTEGER NOT NULL DEFAULT 0,duration_days INTEGER NOT NULL DEFAULT 30,active INTEGER NOT NULL DEFAULT 1);
-  CREATE TABLE IF NOT EXISTS orders(id INTEGER PRIMARY KEY AUTOINCREMENT,user_id INTEGER NOT NULL REFERENCES users(id),package_id INTEGER NOT NULL REFERENCES packages(id),status TEXT NOT NULL DEFAULT 'pending',created_at TEXT NOT NULL);
+  CREATE TABLE IF NOT EXISTS orders(id INTEGER PRIMARY KEY AUTOINCREMENT,user_id INTEGER NOT NULL REFERENCES users(id),package_id INTEGER NOT NULL REFERENCES packages(id),status TEXT NOT NULL DEFAULT 'pending',created_at TEXT NOT NULL,activated_at TEXT NOT NULL DEFAULT '',next_credit_at TEXT NOT NULL DEFAULT '',credited_days INTEGER NOT NULL DEFAULT 0);
   CREATE TABLE IF NOT EXISTS payment_requests(id INTEGER PRIMARY KEY AUTOINCREMENT,user_id INTEGER NOT NULL REFERENCES users(id),kind TEXT NOT NULL CHECK(kind IN ('deposit','withdrawal')),amount_cents INTEGER NOT NULL,network TEXT NOT NULL DEFAULT '',phone TEXT NOT NULL DEFAULT '',reference TEXT NOT NULL DEFAULT '',status TEXT NOT NULL DEFAULT 'pending',created_at TEXT NOT NULL,reviewed_at TEXT NOT NULL DEFAULT '',admin_note TEXT NOT NULL DEFAULT '');
   CREATE TABLE IF NOT EXISTS ledger(id INTEGER PRIMARY KEY AUTOINCREMENT,user_id INTEGER NOT NULL REFERENCES users(id),amount_cents INTEGER NOT NULL,entry_type TEXT NOT NULL,note TEXT NOT NULL,created_at TEXT NOT NULL);
+  CREATE TABLE IF NOT EXISTS earnings_reserve(id INTEGER PRIMARY KEY CHECK(id=1),balance_cents INTEGER NOT NULL DEFAULT 0);
+  INSERT OR IGNORE INTO earnings_reserve(id,balance_cents) VALUES(1,0);
+  CREATE TABLE IF NOT EXISTS reserve_ledger(id INTEGER PRIMARY KEY AUTOINCREMENT,amount_cents INTEGER NOT NULL,note TEXT NOT NULL,created_at TEXT NOT NULL);
+  CREATE TABLE IF NOT EXISTS order_daily_credits(id INTEGER PRIMARY KEY AUTOINCREMENT,order_id INTEGER NOT NULL REFERENCES orders(id),credit_day INTEGER NOT NULL,amount_cents INTEGER NOT NULL,created_at TEXT NOT NULL,UNIQUE(order_id,credit_day));
   """)
   # Safe additive migrations for earlier starter databases.
   cols={r['name'] for r in c.execute('PRAGMA table_info(users)').fetchall()}
   for name,decl in [('phone',"TEXT NOT NULL DEFAULT ''"),('role',"TEXT NOT NULL DEFAULT 'member'"),('balance_cents','INTEGER NOT NULL DEFAULT 0')]:
    if name not in cols: c.execute(f'ALTER TABLE users ADD COLUMN {name} {decl}')
+  ocols={r['name'] for r in c.execute('PRAGMA table_info(orders)').fetchall()}
+  for name,decl in [('activated_at',"TEXT NOT NULL DEFAULT ''"),('next_credit_at',"TEXT NOT NULL DEFAULT ''"),('credited_days','INTEGER NOT NULL DEFAULT 0')]:
+   if name not in ocols: c.execute(f'ALTER TABLE orders ADD COLUMN {name} {decl}')
   pcols={r['name'] for r in c.execute('PRAGMA table_info(payment_requests)').fetchall()}
   if 'reviewed_at' not in pcols: c.execute("ALTER TABLE payment_requests ADD COLUMN reviewed_at TEXT NOT NULL DEFAULT ''")
   if 'admin_note' not in pcols: c.execute("ALTER TABLE payment_requests ADD COLUMN admin_note TEXT NOT NULL DEFAULT ''")
@@ -117,6 +124,44 @@ def order_package(pid):
    cur=c.execute('INSERT INTO orders(user_id,package_id,status,created_at) VALUES(?,?,?,?)',(g.user['id'],pid,'pending',now()))
    flash(f'Package request #{cur.lastrowid} submitted for review.','success')
  return redirect(url_for('dashboard'))
+@app.post('/admin/order/<int:oid>/<action>')
+@admin_required
+def review_order(oid,action):
+ if action not in ('approve','reject'): abort(404)
+ with db() as c:
+  o=c.execute("SELECT o.*,p.name,p.price_cents,p.duration_days FROM orders o JOIN packages p ON p.id=o.package_id WHERE o.id=?",(oid,)).fetchone()
+  if not o or o['status']!='pending': flash('Package request not found or already reviewed.','error')
+  elif action=='approve':
+   u=c.execute('SELECT balance_cents FROM users WHERE id=?',(o['user_id'],)).fetchone()
+   if not u or u['balance_cents']<o['price_cents']:
+    flash('Cannot activate: user has insufficient available balance.','error')
+   else:
+    started=datetime.now(timezone.utc); due=(started+timedelta(hours=24)).isoformat()
+    c.execute('UPDATE users SET balance_cents=balance_cents-? WHERE id=?',(o['price_cents'],o['user_id']))
+    c.execute("UPDATE orders SET status='active',activated_at=?,next_credit_at=? WHERE id=?",(started.isoformat(),due,oid))
+    c.execute('INSERT INTO ledger(user_id,amount_cents,entry_type,note,created_at) VALUES(?,?,?,?,?)',(o['user_id'],-o['price_cents'],'package_purchase',f"Activated {o['name']} package #{oid}",started.isoformat()))
+    flash('Package activated. Its first eligible credit is due after 24 hours and is limited by the funded earnings reserve.','success')
+  else:
+   c.execute("UPDATE orders SET status='rejected' WHERE id=?",(oid,)); flash('Package request rejected.','success')
+ return redirect(url_for('admin'))
+
+@app.post('/admin/reserve/fund')
+@admin_required
+def fund_earnings_reserve():
+ note=request.form.get('note','').strip()[:200]
+ try:
+  amount=Decimal(request.form.get('amount','0')); cents=int(amount*100)
+  if amount<=0 or amount*100!=(amount*100).to_integral_value(): raise InvalidOperation
+ except (InvalidOperation,ValueError):
+  flash('Enter a valid reserve amount.','error'); return redirect(url_for('admin'))
+ if len(note)<8:
+  flash('Add a note identifying the verified, lawful source of these funds.','error'); return redirect(url_for('admin'))
+ with db() as c:
+  c.execute('UPDATE earnings_reserve SET balance_cents=balance_cents+? WHERE id=1',(cents,))
+  c.execute('INSERT INTO reserve_ledger(amount_cents,note,created_at) VALUES(?,?,?)',(cents,note,now()))
+ flash('Earnings reserve updated. Only verified funds should be recorded here.','success')
+ return redirect(url_for('admin'))
+
 @app.route('/payments',methods=['GET','POST'])
 @login_required
 def payments():
@@ -136,6 +181,15 @@ def payments():
    with db() as c: c.execute('INSERT INTO payment_requests(user_id,kind,amount_cents,network,phone,reference,status,created_at) VALUES(?,?,?,?,?,?,?,?)',(g.user['id'],kind,cents,network,phone,ref,'pending',now()))
    flash('Request submitted for administrator review. Deposits are credited only after manual verification.','success'); return redirect(url_for('dashboard'))
  return render_template('payments.html')
+@app.route('/api/account-status')
+@login_required
+def account_status():
+ with db() as c:
+  user=c.execute('SELECT balance_cents FROM users WHERE id=?',(g.user['id'],)).fetchone()
+  rows=c.execute("SELECT o.id,o.status,o.next_credit_at,o.credited_days,o.duration_days,p.daily_display_cents FROM orders o JOIN packages p ON p.id=o.package_id WHERE o.user_id=?",(g.user['id'],)).fetchall()
+  reserve=c.execute('SELECT balance_cents FROM earnings_reserve WHERE id=1').fetchone()['balance_cents']
+ return jsonify({'balance_cents':user['balance_cents'],'reserve_cents':reserve,'orders':[dict(r) for r in rows]})
+
 @app.route('/team')
 @login_required
 def team():
@@ -152,8 +206,10 @@ def admin():
   pending=c.execute("SELECT p.*,u.username,u.phone AS user_phone FROM payment_requests p JOIN users u ON u.id=p.user_id WHERE p.status='pending' ORDER BY p.id").fetchall()
   users=c.execute('SELECT id,username,email,phone,role,balance_cents,created_at FROM users ORDER BY id DESC LIMIT 100').fetchall()
   packages=c.execute('SELECT * FROM packages ORDER BY id').fetchall()
+  orders=c.execute("SELECT o.*,u.username,u.phone,u.balance_cents AS user_balance,p.name,p.price_cents,p.duration_days FROM orders o JOIN users u ON u.id=o.user_id JOIN packages p ON p.id=o.package_id WHERE o.status='pending' ORDER BY o.id").fetchall()
+  reserve=c.execute('SELECT balance_cents FROM earnings_reserve WHERE id=1').fetchone()['balance_cents']
   totals=c.execute('SELECT COUNT(*) n FROM users').fetchone()['n']
- return render_template('admin.html',pending=pending,users=users,packages=packages,total_users=totals)
+ return render_template('admin.html',pending=pending,users=users,packages=packages,total_users=totals,orders=orders,reserve=reserve)
 @app.post('/admin/payment/<int:rid>/<action>')
 @admin_required
 def review_payment(rid,action):
@@ -171,10 +227,9 @@ def review_payment(rid,action):
     c.execute('UPDATE users SET balance_cents=balance_cents+? WHERE id=?',(p['amount_cents'],p['user_id']))
     c.execute('INSERT INTO ledger(user_id,amount_cents,entry_type,note,created_at) VALUES(?,?,?,?,?)',(p['user_id'],p['amount_cents'],'deposit','Admin-approved deposit request #'+str(rid),now()))
    elif action=='approve' and p['kind']=='withdrawal':
-    # Apply 20% displayed withholding; deduct full request and credit payout net in ledger for transparency.
-    tax=p['amount_cents']//5; net=p['amount_cents']-tax
+    # Deduct the approved gross amount. Actual payout must be sent and independently confirmed outside this starter app. No unverified tax is withheld.
     c.execute('UPDATE users SET balance_cents=balance_cents-? WHERE id=?',(p['amount_cents'],p['user_id']))
-    c.execute('INSERT INTO ledger(user_id,amount_cents,entry_type,note,created_at) VALUES(?,?,?,?,?)',(p['user_id'],-p['amount_cents'],'withdrawal','Approved withdrawal #'+str(rid)+'. Requested amount; estimated 20% withholding UGX '+format(tax/100,',.0f')+'; net UGX '+format(net/100,',.0f'),now()))
+    c.execute('INSERT INTO ledger(user_id,amount_cents,entry_type,note,created_at) VALUES(?,?,?,?,?)',(p['user_id'],-p['amount_cents'],'withdrawal','Approved withdrawal request #'+str(rid)+'. Admin must complete and record the real payout separately.',now()))
    flash('Payment request '+status+'. Balance updated only after admin approval where applicable.','success')
  return redirect(url_for('admin'))
 @app.post('/admin/package/<int:pid>/toggle')
@@ -182,6 +237,49 @@ def review_payment(rid,action):
 def toggle_package(pid):
  with db() as c: c.execute('UPDATE packages SET active=CASE active WHEN 1 THEN 0 ELSE 1 END WHERE id=?',(pid,))
  flash('Package status updated.','success'); return redirect(url_for('admin'))
+def process_due_credits():
+ """Credit scheduled package earnings only from a separately funded reserve.
+ The unique (order_id, credit_day) key and BEGIN IMMEDIATE protect against duplicate credits.
+ """
+ current=datetime.now(timezone.utc)
+ try:
+  with db() as c:
+   c.execute('BEGIN IMMEDIATE')
+   due_orders=c.execute("SELECT o.*,p.name,p.daily_display_cents,p.duration_days FROM orders o JOIN packages p ON p.id=o.package_id WHERE o.status='active' AND o.credited_days<p.duration_days AND o.next_credit_at<>'' AND o.next_credit_at<=? ORDER BY o.next_credit_at",(current.isoformat(),)).fetchall()
+   total=0
+   for o in due_orders:
+    due=datetime.fromisoformat(o['next_credit_at'])
+    credited_days=o['credited_days']
+    while due<=current and credited_days<o['duration_days']:
+     reserve=c.execute('SELECT balance_cents FROM earnings_reserve WHERE id=1').fetchone()['balance_cents']
+     amount=o['daily_display_cents']
+     if amount<=0 or reserve<amount:
+      break
+     day=credited_days+1
+     try:
+      c.execute('INSERT INTO order_daily_credits(order_id,credit_day,amount_cents,created_at) VALUES(?,?,?,?)',(o['id'],day,amount,current.isoformat()))
+     except sqlite3.IntegrityError:
+      day+=1
+      break
+     c.execute('UPDATE earnings_reserve SET balance_cents=balance_cents-? WHERE id=1',(amount,))
+     c.execute('UPDATE users SET balance_cents=balance_cents+? WHERE id=?',(amount,o['user_id']))
+     c.execute('INSERT INTO ledger(user_id,amount_cents,entry_type,note,created_at) VALUES(?,?,?,?,?)',(o['user_id'],amount,'daily_earning',f"Funded scheduled credit day {day} for {o['name']} order #{o['id']}",current.isoformat()))
+     total+=1
+     credited_days=day
+     due+=timedelta(hours=24)
+     c.execute('UPDATE orders SET credited_days=?,next_credit_at=? WHERE id=?',(credited_days,due.isoformat(),o['id']))
+    if credited_days>=o['duration_days']:
+     c.execute("UPDATE orders SET status='completed' WHERE id=?",(o['id'],))
+   c.commit()
+  return total
+ except sqlite3.OperationalError:
+  return 0
+
+def _scheduler_loop():
+ while True:
+  process_due_credits()
+  time.sleep(60)
+
 @app.route('/health')
 def health(): return {'status':'ok'}
 @app.errorhandler(403)
@@ -189,4 +287,10 @@ def forbidden(_): return render_template('error.html',code=403,message='Administ
 @app.errorhandler(404)
 def missing(_): return render_template('error.html',code=404,message='Page not found.'),404
 init_db()
-if __name__=='__main__': app.run(host='0.0.0.0',port=int(os.environ.get('PORT','5000')),debug=False)
+if os.environ.get('AIRLINES_DISABLE_SCHEDULER','0')!='1':
+ threading.Thread(target=_scheduler_loop,name='airlines-daily-credits',daemon=True).start()
+if __name__=='__main__':
+ if '--run-daily-credits' in sys.argv:
+  print(f'Processed {process_due_credits()} due credit(s).')
+ else:
+  app.run(host='0.0.0.0',port=int(os.environ.get('PORT','5000')),debug=False)
