@@ -1,0 +1,8 @@
+{% extends "base.html" %}{% block title %}AIRLINES — Financial Community{% endblock %}{% block content %}
+<section class="hero"><div class="eyebrow">NEXT-GEN MEMBER PLATFORM</div><h1>AIRLINES<br><span>Community Portal</span></h1><p>A mobile-first member dashboard for account access, referral tracking, package requests and payment-request records.</p><div class="actions"><a class="btn gold" href="{{ url_for('register') }}">Create account ↗</a><a class="btn outline" href="{{ url_for('login') }}">Member login</a></div><div class="hint">✦ Transparent records · Secure password hashing · USD display</div></section>
+<section class="section"><div class="heading"><div class="eyebrow">MEMBER FEATURES</div><h2>Everything in one place.</h2></div><div class="grid">
+<div class="card"><span>01</span><h3>Member dashboard</h3><p>Review package requests, payment request statuses and referral counts.</p></div>
+<div class="card"><span>02</span><h3>Referral network</h3><p>Share a referral link and see direct registrations.</p></div>
+<div class="card"><span>03</span><h3>Package catalogue</h3><p>Browse package details and submit a pending order request.</p></div>
+<div class="card"><span>04</span><h3>Payment requests</h3><p>Submit deposit or withdrawal requests for manual review.</p></div>
+</div></section><section class="notice"><b>Financial transparency</b><p>Packages in this starter project do not promise earnings. Requests are records only: no payment gateway is connected, and no deposits, withdrawals, commissions or daily rewards are automatically paid. Review local law and use compliant payment services before any real-money launch.</p></section>{% endblock %}
