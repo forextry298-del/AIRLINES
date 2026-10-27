@@ -15,7 +15,11 @@ app.config.update(SESSION_COOKIE_HTTPONLY=True,SESSION_COOKIE_SAMESITE='Lax')
 def now(): return datetime.now(timezone.utc).isoformat()
 def norm_phone(s): return re.sub(r'\D','',s or '')
 def db():
- c=sqlite3.connect(DB,timeout=20); c.row_factory=sqlite3.Row; c.execute('PRAGMA foreign_keys=ON'); return c
+ c=sqlite3.connect(DB,timeout=60)
+ c.row_factory=sqlite3.Row
+ c.execute('PRAGMA foreign_keys=ON')
+ c.execute('PRAGMA busy_timeout=60000')
+ return c
 
 def init_db():
  with db() as c:
@@ -287,7 +291,9 @@ def forbidden(_): return render_template('error.html',code=403,message='Administ
 @app.errorhandler(404)
 def missing(_): return render_template('error.html',code=404,message='Page not found.'),404
 init_db()
-if os.environ.get('AIRLINES_DISABLE_SCHEDULER','0')!='1':
+# Do not start a scheduler thread in each Gunicorn worker.
+# Run scheduled credits in one dedicated process instead.
+if __name__ == '__main__' and os.environ.get('AIRLINES_DISABLE_SCHEDULER','0')!='1':
  threading.Thread(target=_scheduler_loop,name='airlines-daily-credits',daemon=True).start()
 if __name__=='__main__':
  if '--run-daily-credits' in sys.argv:
