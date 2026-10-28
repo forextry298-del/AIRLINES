@@ -213,8 +213,28 @@ def payments():
   elif kind=='withdrawal' and datetime.now().weekday()>=5: flash('Withdrawals are accepted Monday to Friday only.','error')
   elif kind=='withdrawal' and cents>g.user['balance_cents']: flash('Requested amount exceeds your available balance.','error')
   else:
-   with db() as c: c.execute('INSERT INTO payment_requests(user_id,kind,amount_cents,network,phone,reference,status,created_at) VALUES(?,?,?,?,?,?,?,?)',(g.user['id'],kind,cents,network,phone,ref,'pending',now()))
-   flash('Request submitted for administrator review. Deposits are credited only after manual verification.','success'); return redirect(url_for('dashboard'))
+   with db() as c:
+    c.execute('BEGIN IMMEDIATE')
+    if kind == 'withdrawal':
+     changed=c.execute(
+      'UPDATE users SET balance_cents=balance_cents-? WHERE id=? AND balance_cents>=?',
+      (cents,g.user['id'],cents)
+     ).rowcount
+     if changed != 1:
+      c.rollback()
+      flash('Insufficient balance.','error')
+      return redirect(url_for('payments'))
+    cur=c.execute(
+     'INSERT INTO payment_requests(user_id,kind,amount_cents,network,phone,reference,status,created_at) VALUES(?,?,?,?,?,?,?,?)',
+     (g.user['id'],kind,cents,network,phone,ref,'pending',now())
+    )
+    if kind == 'withdrawal':
+     c.execute(
+      'INSERT INTO ledger(user_id,amount_cents,entry_type,note,created_at) VALUES(?,?,?,?,?)',
+      (g.user['id'],-cents,'withdrawal_pending',f'Withdrawal request #{cur.lastrowid} submitted; amount reserved from available balance.',now())
+     )
+   flash('Withdrawal amount deducted and request submitted for review.' if kind=='withdrawal' else 'Deposit request submitted for administrator review. Deposits are credited only after manual verification.','success')
+   return redirect(url_for('dashboard'))
  return render_template('payments.html')
 @app.route('/api/account-status')
 @login_required
@@ -253,19 +273,18 @@ def review_payment(rid,action):
  with db() as c:
   p=c.execute('SELECT * FROM payment_requests WHERE id=?',(rid,)).fetchone()
   if not p or p['status']!='pending': flash('Request not found or already reviewed.','error')
-  elif action=='approve' and p['kind']=='withdrawal' and p['amount_cents']>c.execute('SELECT balance_cents FROM users WHERE id=?',(p['user_id'],)).fetchone()['balance_cents']:
-   flash('Cannot approve withdrawal: insufficient available balance.','error')
   else:
    status='approved' if action=='approve' else 'rejected'
    c.execute('UPDATE payment_requests SET status=?,reviewed_at=?,admin_note=? WHERE id=?',(status,now(),note,rid))
    if action=='approve' and p['kind']=='deposit':
     c.execute('UPDATE users SET balance_cents=balance_cents+? WHERE id=?',(p['amount_cents'],p['user_id']))
     c.execute('INSERT INTO ledger(user_id,amount_cents,entry_type,note,created_at) VALUES(?,?,?,?,?)',(p['user_id'],p['amount_cents'],'deposit','Admin-approved deposit request #'+str(rid),now()))
+   elif action=='reject' and p['kind']=='withdrawal':
+    c.execute('UPDATE users SET balance_cents=balance_cents+? WHERE id=?',(p['amount_cents'],p['user_id']))
+    c.execute('INSERT INTO ledger(user_id,amount_cents,entry_type,note,created_at) VALUES(?,?,?,?,?)',(p['user_id'],p['amount_cents'],'withdrawal_refund','Refund for rejected withdrawal request #'+str(rid),now()))
    elif action=='approve' and p['kind']=='withdrawal':
-    # Deduct the approved gross amount. Actual payout must be sent and independently confirmed outside this starter app. No unverified tax is withheld.
-    c.execute('UPDATE users SET balance_cents=balance_cents-? WHERE id=?',(p['amount_cents'],p['user_id']))
-    c.execute('INSERT INTO ledger(user_id,amount_cents,entry_type,note,created_at) VALUES(?,?,?,?,?)',(p['user_id'],-p['amount_cents'],'withdrawal','Approved withdrawal request #'+str(rid)+'. Admin must complete and record the real payout separately.',now()))
-   flash('Payment request '+status+'. Balance updated only after admin approval where applicable.','success')
+    c.execute('INSERT INTO ledger(user_id,amount_cents,entry_type,note,created_at) VALUES(?,?,?,?,?)',(p['user_id'],0,'withdrawal_approved','Withdrawal request #'+str(rid)+' approved; amount was already deducted. Complete the real payout separately.',now()))
+   flash('Payment request '+status+'.','success')
  return redirect(url_for('admin'))
 @app.post('/admin/package/<int:pid>/toggle')
 @admin_required
