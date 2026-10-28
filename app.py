@@ -90,6 +90,7 @@ def register():
      session['user_id']=cur.lastrowid
     flash('Account created. UGX 8,000 welcome bonus recorded.','success')
     if role=='admin': flash('Administrator access enabled for this account. Ensure this phone number is verified before public launch.','info')
+    session['show_telegram_popup'] = True
     return redirect(url_for('admin') if role=='admin' else url_for('dashboard'))
    except sqlite3.IntegrityError: flash('That username or email is already registered.','error')
  return render_template('register.html',ref=ref)
