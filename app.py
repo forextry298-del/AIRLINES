@@ -132,6 +132,7 @@ def order_package(pid):
    flash('Insufficient balance.','error')
    return redirect(url_for('packages'))
 
+  # Start the hidden 30-day machine timer at purchase.
   started=datetime.now(timezone.utc)
   due=(started+timedelta(hours=24)).isoformat()
   changed=c.execute(
@@ -312,6 +313,16 @@ def _scheduler_loop():
  while True:
   process_due_credits()
   time.sleep(60)
+
+
+@app.route('/cron/daily-credits', methods=['POST'])
+def cron_daily_credits():
+ token = os.environ.get('CRON_SECRET', '')
+ supplied = request.headers.get('X-Cron-Secret', '')
+ if not token or not secrets.compare_digest(token, supplied):
+  abort(403)
+ processed = process_due_credits()
+ return jsonify({'status': 'ok', 'processed': processed})
 
 @app.route('/health')
 def health(): return {'status':'ok'}
